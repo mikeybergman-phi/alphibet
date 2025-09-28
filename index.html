@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>φ-spiral band — 1..1000 instanced copies on torus</title>
+<style>
+  html,body{height:100%;margin:0;background:#081024;color:#e7eaee;font:14px ui-sans-serif,system-ui,-apple-system}
+  #app{position:fixed;inset:0}
+  .ui{position:fixed;top:12px;left:12px;background:rgba(15,22,32,.92);border:1px solid #233244;border-radius:12px;
+      padding:12px;display:grid;gap:10px;min-width:740px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .row label{color:#9fb1c7}
+  .row input[type="range"]{flex:1}
+  .row output{min-width:72px;text-align:right;color:#ffd66b}
+  button{background:#0f1725;border:1px solid #2c4461;color:#e7eaee;padding:6px 10px;border-radius:8px;cursor:pointer}
+  button:hover{border-color:#446c96}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #2c4461;border-radius:999px;background:#0f1725}
+  .small{font-size:12px;color:#9fb1c7;line-height:1.35}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="ui">
+  <div class="small">
+    Continuous <b>φ-spiral band</b> painted on a horn torus (<b>R=1, r=1</b>) with constant thickness <b>0.001</b>,<br>
+    mirrored through the equator so it becomes the opposing spiral on the other side. Then instanced into <b>1..1000</b> copies, equally spaced about the Z-axis.
+  </div>
+
+  <div class="row">
+    <label>Spirals (1–1000)</label>
+    <input id="count" type="range" min="1" max="1000" step="1" value="6">
+    <output id="countOut">6</output>
+
+    <label>Around factor</label>
+    <input id="uScale" type="range" min="1.00" max="2.00" step="0.01" value="1.00">
+    <output id="uOut">1.00</output>
+
+    <label>Opacity</label>
+    <input id="opacity" type="range" min="0.00" max="1.00" step="0.01" value="1.00">
+    <output id="opacityOut">1.00</output>
+  </div>
+
+  <div class="row">
+    <label>Spin (°/s)</label>
+    <input id="spinSpeed" type="range" min="0" max="180" step="1" value="18">
+    <output id="spinOut">18</output>
+
+    <label>Color cycle (°/s)</label>
+    <input id="hueSpeed" type="range" min="0" max="360" step="1" value="60">
+    <output id="hueOut">60</output>
+
+    <label class="pill"><input id="showTorus" type="checkbox" checked> Torus wire guide</label>
+  </div>
+
+  <div class="row">
+    <button id="resetView">Reset view</button>
+    <button id="lookZ">Look +Z</button>
+    <button id="lookX">Look +X</button>
+    <button id="lookY">Look +Y</button>
+  </div>
+</div>
+
+<!-- Import map -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+/* constants */
+const PHI=(1+Math.sqrt(5))/2;
+const k_phi=Math.log(PHI)/(Math.PI/2);
+const R=1.0, r=1.0;
+const TURNS=2;                          // per side (we build symmetric across equator)
+const TWO_PI=Math.PI*2;
+const WCONST=0.001;                     // constant world thickness
+
+/* UI */
+const $=id=>document.getElementById(id);
+const ui={
+  count:$('count'), uScale:$('uScale'), opacity:$('opacity'), showTorus:$('showTorus'),
+  spinSpeed:$('spinSpeed'), hueSpeed:$('hueSpeed'),
+  countOut:$('countOut'), uOut:$('uOut'), opacityOut:$('opacityOut'),
+  spinOut:$('spinOut'), hueOut:$('hueOut'),
+  resetView:$('resetView'), lookZ:$('lookZ'), lookX:$('lookX'), lookY:$('lookY')
+};
+function syncOut(){
+  ui.countOut.textContent=(+ui.count.value|0);
+  ui.uOut.textContent=(+ui.uScale.value).toFixed(2);
+  ui.opacityOut.textContent=(+ui.opacity.value).toFixed(2);
+  ui.spinOut.textContent=(+ui.spinSpeed.value);
+  ui.hueOut.textContent=(+ui.hueSpeed.value);
+}
+
+/* scene */
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x081024);
+const camera=new THREE.PerspectiveCamera(56, innerWidth/innerHeight, 0.01, 2000);
+camera.position.set(4.8,3.8,5.0);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+document.getElementById('app').appendChild(renderer.domElement);
+const controls=new OrbitControls(camera, renderer.domElement); controls.enableDamping=true;
+
+/* lights */
+scene.add(new THREE.HemisphereLight(0xffffff,0x091018,0.95));
+scene.add(new THREE.AmbientLight(0xffffff,0.35));
+const key=new THREE.DirectionalLight(0xffffff,1.0); key.position.set(3,5,4); scene.add(key);
+
+/* world */
+const world=new THREE.Group(); scene.add(world);
+let torusGuide=null;
+let inst=null;                   // InstancedMesh of the band
+let baseGeom=null;
+let mat=null;
+
+/* torus mapping */
+function torusPos(u,v){
+  const cu=Math.cos(u), su=Math.sin(u), cv=Math.cos(v), sv=Math.sin(v);
+  return new THREE.Vector3((R+r*cv)*cu,(R+r*cv)*su,r*sv);
+}
+function torusPartials(u,v){
+  const cu=Math.cos(u), su=Math.sin(u), cv=Math.cos(v), sv=Math.sin(v);
+  const Xu=new THREE.Vector3(-(R+r*cv)*su,(R+r*cv)*cu,0);
+  const Xv=new THREE.Vector3(-r*sv*cu,-r*sv*su,r*cv);
+  return {Xu,Xv};
+}
+function wrapPi(a){ a=((a+Math.PI)%(TWO_PI)); if(a<=0) a+=TWO_PI; return a-Math.PI; }
+
+/* Symmetric φ spiral crossing equator:
+   θ ∈ [-θmax, +θmax], τ=|θ|, s=sign(θ)
+   v_raw = s*(π - (π - v0) e^{-k τ})
+   shift to make v(0)=0 : v = v_raw - s*v0
+   u(θ) = uScale*θ
+*/
+function uvCurveSym(theta,kScale,v0,uScale){
+  const k=k_phi*kScale;
+  const tau=Math.abs(theta);
+  const s=(theta>=0)?1:-1;
+  const v_raw = s*(Math.PI - (Math.PI - v0)*Math.exp(-k*tau));
+  const v = wrapPi(v_raw - s*v0);
+  const u = uScale*theta;
+  return {u,v};
+}
+function uvTangentSym(theta,kScale,v0,uScale){
+  const k=k_phi*kScale;
+  const tau=Math.abs(theta);
+  const du=uScale;
+  const dv=(Math.PI - v0)*k*Math.exp(-k*tau);
+  return {du,dv};
+}
+
+/* Build base band geometry once (no per-vertex colors; we’ll color in shader) */
+function buildBaseGeometry(){
+  if(baseGeom){ baseGeom.dispose(); baseGeom=null; }
+  const kScale=1.0, v0=0.12, uScale=+ui.uScale.value;
+  const N=3200, W=8;
+  const thetaMax=TWO_PI*TURNS, thetaMin=-thetaMax;
+  const dTheta=(thetaMax-thetaMin)/N;
+
+  const verts=[], norms=[], uvs=[], tLen=[], indices=[];
+  for(let i=0;i<=N;i++){
+    const t=i/N, th=thetaMin + i*dTheta;
+    const {u,v}=uvCurveSym(th,kScale,v0,uScale);
+    const {du,dv}=uvTangentSym(th,kScale,v0,uScale);
+
+    // metric-perp direction in (u,v) normalized to world length
+    const E=(R + r*Math.cos(v))**2, G=r*r;
+    const nu=-G*dv, nv=E*du;
+    const nLen=Math.max(1e-9, Math.sqrt(E*nu*nu + G*nv*nv));
+    const nuN=nu/nLen, nvN=nv/nLen;
+
+    const w=WCONST; // constant thickness
+
+    for(let j=0;j<=W;j++){
+      const s=(j/W - 0.5);
+      const u2=u + s*w*nuN;
+      const v2=v + s*w*nvN;
+
+      const P=torusPos(u2,v2);
+      const {Xu:ux,Xv:vx}=torusPartials(u2,v2);
+      const Nsurf=vx.clone().cross(ux).normalize();
+
+      verts.push(P.x,P.y,P.z);
+      norms.push(Nsurf.x,Nsurf.y,Nsurf.z);
+      uvs.push(j/W, t);
+      tLen.push((th - thetaMin)/(thetaMax-thetaMin)); // 0..1 along full path
+    }
+
+    if(i<N){
+      for(let j=0;j<W;j++){
+        const a=(W+1)*i + j, b=(W+1)*(i+1) + j, c=(W+1)*(i+1) + j+1, d=(W+1)*i + j+1;
+        indices.push(a,b,d, b,c,d);
+      }
+    }
+  }
+
+  baseGeom=new THREE.BufferGeometry();
+  baseGeom.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(verts),3));
+  baseGeom.setAttribute('normal',   new THREE.Float32BufferAttribute(new Float32Array(norms),3));
+  baseGeom.setAttribute('uv',       new THREE.Float32BufferAttribute(new Float32Array(uvs),2));
+  baseGeom.setAttribute('tLen',     new THREE.Float32BufferAttribute(new Float32Array(tLen),1));
+  baseGeom.setIndex(indices);
+  baseGeom.computeVertexNormals();
+}
+
+/* Shader material with per-instance hue and animated huePhase */
+function makeMaterial(){
+  if(mat){ mat.dispose(); mat=null; }
+  const m=new THREE.MeshStandardMaterial({
+    color:0xffffff, metalness:0.25, roughness:0.38,
+    side:THREE.DoubleSide, transparent:true, opacity:+ui.opacity.value
+  });
+  m.depthWrite=(+ui.opacity.value>=0.999);
+  m.onBeforeCompile = (shader)=>{
+    // uniforms
+    shader.uniforms.huePhase = { value: 0.0 };
+
+    // add attributes/varyings
+    shader.vertexShader =
+      'uniform float huePhase;\n' +
+      'attribute float tLen;\n' +
+      'attribute float instanceHue;\n' +
+      'varying float vHue;\n' +
+      shader.vertexShader.replace(
+        'void main() {',
+        'void main() {\n  vHue = tLen + instanceHue + huePhase;'
+      );
+
+    // HSL to RGB and color override
+    const hslFunc = `
+      varying float vHue;
+      vec3 hsl2rgb(float h, float s, float l){
+        float c = (1.0 - abs(2.0*l - 1.0)) * s;
+        float x = c * (1.0 - abs(mod(h*6.0, 2.0) - 1.0));
+        float m = l - 0.5*c;
+        vec3 rgb;
+        if(h < 1.0/6.0) rgb = vec3(c, x, 0.0);
+        else if(h < 2.0/6.0) rgb = vec3(x, c, 0.0);
+        else if(h < 3.0/6.0) rgb = vec3(0.0, c, x);
+        else if(h < 4.0/6.0) rgb = vec3(0.0, x, c);
+        else if(h < 5.0/6.0) rgb = vec3(x, 0.0, c);
+        else rgb = vec3(c, 0.0, x);
+        return rgb + vec3(m);
+      }
+    `;
+    shader.fragmentShader =
+      'uniform float huePhase;\n' +
+      hslFunc +
+      shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\n' +
+        '  vec3 hueRgb = hsl2rgb(fract(vHue), 1.0, 0.55);\n' +
+        '  diffuseColor.rgb = hueRgb;'
+      );
+
+    m.userData.shader = shader;
+  };
+  return (mat=m);
+}
+
+/* Build / rebuild instanced set */
+function rebuild(){
+  // clean old
+  if(inst){ world.remove(inst); inst.geometry.dispose(); inst.material.dispose(); inst=null; }
+  if(torusGuide){ world.remove(torusGuide); torusGuide.geometry.dispose(); torusGuide.material.dispose(); torusGuide=null; }
+
+  // guide
+  if(ui.showTorus.checked){
+    torusGuide=new THREE.Mesh(new THREE.TorusGeometry(R,r,64,256),
+      new THREE.MeshBasicMaterial({wireframe:true,color:0x355a82,transparent:true,opacity:0.28}));
+    world.add(torusGuide);
+  }
+
+  // base geom & mat
+  buildBaseGeometry();
+  const material = makeMaterial();
+
+  const count = Math.max(1, Math.min(1000, (+ui.count.value|0)));
+  const mesh = new THREE.InstancedMesh(baseGeom, material, count);
+
+  // per-instance hue offset [0..1)
+  const hues = new Float32Array(count);
+  for(let i=0;i<count;i++) hues[i] = i / count;
+  mesh.geometry.setAttribute('instanceHue', new THREE.InstancedBufferAttribute(hues, 1));
+
+  // per-instance transforms (rotations about Z)
+  const M = new THREE.Matrix4();
+  const ROTSTEP = TWO_PI / count;
+  for(let i=0;i<count;i++){
+    M.makeRotationZ(i*ROTSTEP);
+    mesh.setMatrixAt(i, M);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+
+  inst = mesh;
+  world.add(inst);
+  syncOut();
+}
+
+/* views */
+function resetView(){ camera.position.set(4.8,3.8,5.0); controls.target.set(0,0,0); controls.update(); }
+function lookZ(){ camera.position.set(0,0,7.2); controls.target.set(0,0,0); controls.update(); }
+function lookX(){ camera.position.set(7.2,0,0); controls.target.set(0,0,0); controls.update(); }
+function lookY(){ camera.position.set(0,7.2,0); controls.target.set(0,0,0); controls.update(); }
+
+/* UI wiring */
+['count','uScale','showTorus'].forEach(id=>$(id).addEventListener('input', rebuild));
+ui.opacity.addEventListener('input', ()=>{
+  if(mat){ mat.opacity=+ui.opacity.value; mat.depthWrite=(+ui.opacity.value>=0.999); }
+  syncOut();
+});
+ui.spinSpeed.addEventListener('input', syncOut);
+ui.hueSpeed.addEventListener('input', syncOut);
+
+ui.resetView.addEventListener('click', resetView);
+ui.lookZ.addEventListener('click', lookZ);
+ui.lookX.addEventListener('click', lookX);
+ui.lookY.addEventListener('click', lookY);
+
+/* animate */
+rebuild(); resetView();
+const clock=new THREE.Clock();
+let huePhase=0;
+function tick(){
+  const dt=clock.getDelta();
+  const spinΩ=(+ui.spinSpeed.value)*Math.PI/180;
+  const hueΩ=(+ui.hueSpeed.value)/360;
+
+  if(spinΩ>0){ world.rotation.z += spinΩ*dt; }
+  if(hueΩ>0 && mat && mat.userData.shader){
+    huePhase = (huePhase + hueΩ*dt) % 1;
+    mat.userData.shader.uniforms.huePhase.value = huePhase;
+  }
+
+  controls.update(); renderer.render(scene,camera);
+  requestAnimationFrame(tick);
+}
+tick();
+
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
